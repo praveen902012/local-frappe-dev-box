@@ -1,92 +1,89 @@
 # Frappe v15 Devbox
 
-`neuron27/frappe-v15-devbox` is a browser-accessible Frappe v15 developer workspace image. It gives you a ready-to-run bench with code-server, Supervisor, and optional local MariaDB and Redis so you can start building quickly with Docker.
+`neuron27/frappe-v15-devbox` is a browser-accessible Frappe v15 developer workspace image. It gives you a ready-to-run bench with code-server, Supervisor, and optional local MariaDB and Redis so you can start building quickly with Docker or on Kubernetes.
 
-This image is meant for a single developer workspace, not a full production Frappe cluster.
+This image is meant for a single developer or staging workspace, not a full production Frappe cluster.
 
 ## What you get
 
-- Frappe Bench
-- code-server in the browser
-- Supervisor-managed processes
-- Optional local MariaDB
-- Optional local Redis
+- Frappe Bench (v15)
+- code-server in the browser, password-protected by default
+- Supervisor managing MariaDB, Redis, code-server and `bench start`
+- Optional local MariaDB and Redis, bound to loopback only
 - First-run bootstrap for bench and site creation
+- Runs as an unprivileged user (uid 1000), compatible with Kubernetes Pod Security `restricted`
 
 ## Quick start
-
-Pull the image:
-
-```bash
-docker pull neuron27/frappe-v15-devbox:latest
-```
-
-Run it with local MariaDB and Redis:
 
 ```bash
 docker run --rm -it \
   -p 8000:8000 \
+  -p 9000:9000 \
   -p 8080:8080 \
   -e SITE_NAME=dev.localhost \
   -e SITE_ADMIN_PASSWORD='change-me-now' \
   -e DB_ROOT_PASSWORD='change-me-now' \
-  -e CREATE_SITE_ON_FIRST_RUN=1 \
-  -e ENABLE_LOCAL_MARIADB=1 \
-  -e ENABLE_LOCAL_REDIS=1 \
-  -v frappe-workspace:/workspace \
-  -v frappe-mariadb:/var/lib/mysql \
-  -v frappe-redis:/var/lib/redis \
-  -v frappe-code-server:/home/frappe/.local/share/code-server \
+  -e PASSWORD='code-server-password' \
+  -v frappe-data:/data \
   neuron27/frappe-v15-devbox:latest
 ```
 
 After startup:
 
-- Frappe will be available at `http://localhost:8000`
-- code-server will be available at `http://localhost:8080`
-- code-server opens the bench directory by default
+- Frappe: `http://localhost:8000`
+- code-server: `http://localhost:8080` (log in with `PASSWORD`)
+
+Everything that persists (bench, MariaDB, Redis, code-server settings and extensions) lives in the single `/data` volume.
 
 ## First boot behavior
 
-On the first run, the container can:
+On the first run the container:
 
-- initialize the local MariaDB data directory
-- start local Redis if enabled
-- create a new Frappe bench if one does not exist
-- create the site defined by `SITE_NAME`
-- install requested code-server extensions
+- initializes the MariaDB data directory and sets the root password
+- creates a Frappe bench (git clone, Python env, yarn install, asset build)
+- creates the site defined by `SITE_NAME` and installs `DEVBOX_INSTALL_APPS`
+- installs the requested code-server extensions
 
-When you reuse the same Docker volumes, the container is designed to be idempotent and should not recreate the bench, site, or extensions unnecessarily.
+This takes 15–30 minutes. Later starts reuse the volume and take seconds.
+
+If the first `bench init` fails (for example a network error), the container exits with a clear error and removes the half-built bench on the next start, so a restart retries from a clean state.
 
 ## Required environment variables
-
-For the standard local setup, set these:
 
 - `SITE_NAME`
 - `SITE_ADMIN_PASSWORD`
 - `DB_ROOT_PASSWORD`
+- `PASSWORD` (or `HASHED_PASSWORD`) for code-server, unless `ENABLE_CODE_SERVER=0` or `CODE_SERVER_AUTH=none`
 
 ## Common environment variables
 
-- `ENABLE_LOCAL_MARIADB`: `1` to use MariaDB inside the container, `0` to use an external database
-- `DB_HOST`: required when `ENABLE_LOCAL_MARIADB=0`
-- `DB_PORT`: MariaDB port, default `3306`
-- `ENABLE_LOCAL_REDIS`: `1` to use Redis inside the container, `0` to use an external Redis
+- `ENABLE_LOCAL_MARIADB`: `1` (default) for MariaDB inside the container, `0` for an external database
+- `DB_HOST`, `DB_PORT`: required/used when `ENABLE_LOCAL_MARIADB=0`
+- `ENABLE_LOCAL_REDIS`: `1` (default) for Redis inside the container, `0` for external Redis
 - `REDIS_URL`: required when `ENABLE_LOCAL_REDIS=0`
-- `CREATE_SITE_ON_FIRST_RUN`: `1` to create the site automatically if it does not exist
+- `ENABLE_CODE_SERVER`: `1` (default) to run code-server, `0` to disable it
+- `CODE_SERVER_AUTH`: `password` (default) or `none`. `none` gives anyone who can reach port 8080 a shell; only use it behind a private port-forward
+- `CREATE_SITE_ON_FIRST_RUN`: `1` to create the site if it does not exist
 - `DEVBOX_INSTALL_APPS`: comma-separated apps to install after site creation
 - `VSCODE_EXTENSIONS`: comma-separated code-server extension IDs
-- `INSTALL_VSCODE_EXTENSIONS`: `1` to install extensions only when the requested set changes
-- `BENCH_DIR`: bench path, default `/workspace/frappe-bench`
+- `INSTALL_VSCODE_EXTENSIONS`: `1` to install extensions when the requested set changes
 - `DEVELOPER_MODE`: bench-wide developer mode, default `1`
 - `DNS_MULTITENANT`: bench-wide dns_multitenant flag, default `0`
+
+## Security model
+
+- The container runs as uid/gid 1000. It refuses to start as root, never changes file ownership, and needs no Linux capabilities.
+- MariaDB and Redis listen on `127.0.0.1` only. Redis runs with protected mode on.
+- MariaDB keeps exactly two root accounts, `root@localhost` and `root@127.0.0.1`, both password-protected. Any other root account (including `root@'%'` from earlier versions of this image) is removed on start.
+- The MariaDB root password is passed to clients through a `0600` option file, not on the command line, and is escaped before use in SQL.
+- MariaDB and Redis are run by Supervisor, so stopping the container shuts them down cleanly.
+- code-server requires a password by default.
 
 ## External DB and Redis example
 
 ```bash
 docker run --rm -it \
-  -p 8000:8000 \
-  -p 8080:8080 \
+  -p 8000:8000 -p 9000:9000 -p 8080:8080 \
   -e SITE_NAME=dev.example.internal \
   -e SITE_ADMIN_PASSWORD='change-me-now' \
   -e DB_ROOT_PASSWORD='mysql-root-password' \
@@ -95,31 +92,67 @@ docker run --rm -it \
   -e DB_PORT=3306 \
   -e ENABLE_LOCAL_REDIS=0 \
   -e REDIS_URL='redis://redis.example.internal:6379' \
-  -v frappe-workspace:/workspace \
-  -v frappe-code-server:/home/frappe/.local/share/code-server \
+  -e PASSWORD='code-server-password' \
+  -v frappe-data:/data \
   neuron27/frappe-v15-devbox:latest
 ```
 
+## Kubernetes (k3s)
+
+`k8s/frappe-devbox.yaml` deploys the devbox with a single `local-path` PVC, Pod Security `restricted`, a read-only root filesystem, a NetworkPolicy that only admits Traefik, and an Ingress that routes `/socket.io` to port 9000.
+
+```bash
+# edit the image tag, Secret values and Ingress host first
+kubectl apply -f k8s/frappe-devbox.yaml
+kubectl -n frappe-staging logs -f deploy/frappe-devbox
+kubectl -n frappe-staging port-forward deploy/frappe-devbox 8080:8080   # code-server
+```
+
+code-server is deliberately not exposed through the Service or Ingress.
+
+## Build
+
+Multi-arch (Apple Silicon and amd64 servers):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t neuron27/frappe-v15-devbox:0.2.0 -t neuron27/frappe-v15-devbox:latest \
+  --push .
+```
+
+Build arguments:
+
+- `INSTALL_CODE_SERVER=0` builds without code-server
+- `CODE_SERVER_VERSION=4.x.y` pins code-server (default: latest)
+
+## Upgrading from 0.1.x
+
+0.1.x ran as root and used four volumes (`/workspace`, `/var/lib/mysql`, `/var/lib/redis`, code-server data). 0.2.0 runs as uid 1000 with one `/data` volume. To keep existing data, copy the old volumes into the new layout and hand them to uid 1000:
+
+```bash
+docker run --rm \
+  -v frappe-workspace:/old/workspace -v frappe-mariadb:/old/mysql \
+  -v frappe-redis:/old/redis -v frappe-code-server:/old/code-server \
+  -v frappe-data:/data ubuntu:24.04 bash -c '
+    mkdir -p /data/workspace /data/mysql /data/redis /data/code-server/user-data /data/code-server/extensions &&
+    cp -a /old/workspace/. /data/workspace/ &&
+    cp -a /old/mysql/. /data/mysql/ &&
+    cp -a /old/redis/. /data/redis/ &&
+    cp -a /old/code-server/. /data/code-server/user-data/ &&
+    chown -R 1000:1000 /data'
+```
+
+The new container also removes the old `root@'%'` MariaDB account on its first start.
+
 ## Verify it is working
 
-Use this quick check after startup:
-
-1. Watch the container logs and confirm bootstrap completes without errors.
-2. Open `http://localhost:8080` and confirm code-server loads.
-3. Open `http://localhost:8000` and confirm the Frappe site responds.
-4. Stop the container and run the same command again with the same volumes.
-5. Confirm the restart is faster and the existing bench and site are reused.
-
-## Available tags
-
-- `latest`
-- `v15`
-- `0.1.0`
-- `amd64`
+1. Watch the logs and confirm `Bootstrap complete` appears.
+2. Open `http://localhost:8000` and confirm the Frappe site responds.
+3. Open `http://localhost:8080`, log in with `PASSWORD`, and confirm code-server loads.
+4. Restart the container with the same volume and confirm the bench and site are reused.
 
 ## Notes
 
-- This image is for development and learning workflows.
-- It is not a full multi-service production deployment model for Frappe.
-- The first run can take a while because bench setup and asset build happen there.
+- This image is for development, learning and staging workflows.
+- It is not a multi-service production deployment of Frappe.
 - The image is published at [Docker Hub](https://hub.docker.com/r/neuron27/frappe-v15-devbox).

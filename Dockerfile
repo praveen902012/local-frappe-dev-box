@@ -1,9 +1,22 @@
 FROM ubuntu:24.04
 
+# Set to 0 to build without code-server (smaller image, no browser IDE).
+ARG INSTALL_CODE_SERVER=1
+# Pin for reproducible builds, e.g. --build-arg CODE_SERVER_VERSION=4.96.4 (empty = latest).
+ARG CODE_SERVER_VERSION=
+ARG NVM_VERSION=v0.39.7
+
+# Everything that must persist lives under /data so the image needs a single
+# writable volume (one PVC on Kubernetes, no subPaths).
 ENV DEBIAN_FRONTEND=noninteractive \
     FRAPPE_USER=frappe \
     FRAPPE_HOME=/home/frappe \
-    BENCH_DIR=/workspace/frappe-bench \
+    DATA_DIR=/data \
+    BENCH_DIR=/data/workspace/frappe-bench \
+    MARIADB_DATA_DIR=/data/mysql \
+    REDIS_DATA_DIR=/data/redis \
+    CODE_SERVER_DATA_DIR=/data/code-server \
+    RUN_DIR=/tmp/devbox-run \
     BENCH_CMD=bench \
     SITE_NAME=dev.localhost \
     DB_PORT=3306 \
@@ -13,19 +26,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CREATE_SITE_ON_FIRST_RUN=1 \
     INSTALL_VSCODE_EXTENSIONS=1 \
     PATCH_PROCFILE_FOR_DEV_SERVER=1 \
-    ADD_SITE_TO_ETC_HOSTS=0 \
     MARIADB_START_TIMEOUT=60 \
     ENABLE_LOCAL_MARIADB=1 \
     ENABLE_LOCAL_REDIS=1 \
+    ENABLE_CODE_SERVER=1 \
     CODE_SERVER_BIN=/usr/bin/code-server \
+    CODE_SERVER_AUTH=password \
+    CODE_SERVER_BIND_ADDR=0.0.0.0:8080 \
     VSCODE_EXTENSIONS=ms-python.python,dbaeumer.vscode-eslint \
     LOCAL_VSIX_PATH= \
     NVM_DIR=/usr/local/nvm \
     NODE_VERSION=20.12.2 \
-    FRAPPE_BRANCH=version-15 \
-    CODE_SERVER_BIND_ADDR=0.0.0.0:8080
+    FRAPPE_BRANCH=version-15
 
-SHELL ["/bin/bash", "-lc"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -60,71 +74,65 @@ RUN apt-get update && \
       python3-venv \
       redis-server \
       rsync \
-      software-properties-common \
       supervisor \
       tini \
       unzip \
-      util-linux \
       vim \
       xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p "${NVM_DIR}" && \
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && \
+    curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | bash && \
     source "${NVM_DIR}/nvm.sh" && \
     nvm install "${NODE_VERSION}" && \
     nvm alias default "${NODE_VERSION}" && \
-    nvm use default && \
     npm install -g yarn && \
-    ln -sf "${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/node" /usr/local/bin/node && \
-    ln -sf "${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/npm" /usr/local/bin/npm && \
-    ln -sf "${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/npx" /usr/local/bin/npx && \
-    ln -sf "${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/yarn" /usr/local/bin/yarn
+    npm cache clean --force && \
+    for bin in node npm npx yarn; do \
+      ln -sf "${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/${bin}" "/usr/local/bin/${bin}"; \
+    done
 
-RUN curl -fsSL https://code-server.dev/install.sh | sh
+RUN if [[ "${INSTALL_CODE_SERVER}" == "1" ]]; then \
+      if [[ -n "${CODE_SERVER_VERSION}" ]]; then \
+        curl -fsSL https://code-server.dev/install.sh | sh -s -- --version "${CODE_SERVER_VERSION}"; \
+      else \
+        curl -fsSL https://code-server.dev/install.sh | sh; \
+      fi; \
+    fi
 
+# setuptools>=81 drops pkg_resources, which Ubuntu's supervisor imports;
+# an unpinned install here breaks supervisord at startup.
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
       frappe-bench \
-      setuptools \
-      wheel
+      "setuptools<81" \
+      wheel && \
+    python3 -c "import pkg_resources" 2>/dev/null && \
+    supervisord --version
 
-RUN if ! getent group "${FRAPPE_USER}" >/dev/null; then \
-      existing_group="$(getent group 1000 | cut -d: -f1 || true)"; \
-      if [[ -n "${existing_group}" ]]; then \
-        groupmod -n "${FRAPPE_USER}" "${existing_group}"; \
-      else \
-        groupadd --gid 1000 "${FRAPPE_USER}"; \
-      fi; \
+# Run everything as uid/gid 1000. ubuntu:24.04 ships an "ubuntu" user with
+# uid 1000, so rename it rather than creating a second user.
+RUN if id -u ubuntu >/dev/null 2>&1; then \
+      groupmod -n "${FRAPPE_USER}" ubuntu && \
+      usermod -l "${FRAPPE_USER}" -d "${FRAPPE_HOME}" -m -s /bin/bash ubuntu; \
+    else \
+      groupadd --gid 1000 "${FRAPPE_USER}" && \
+      useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash "${FRAPPE_USER}"; \
     fi && \
-    if ! id -u "${FRAPPE_USER}" >/dev/null 2>&1; then \
-      existing_user="$(getent passwd 1000 | cut -d: -f1 || true)"; \
-      if [[ -n "${existing_user}" ]]; then \
-        usermod -l "${FRAPPE_USER}" -d "${FRAPPE_HOME}" -m -g "${FRAPPE_USER}" -s /bin/bash "${existing_user}"; \
-      else \
-        useradd --uid 1000 --gid "${FRAPPE_USER}" --create-home --shell /bin/bash "${FRAPPE_USER}"; \
-      fi; \
-    fi && \
-    mkdir -p \
-      /workspace \
-      /var/lib/mysql \
-      /var/lib/redis \
-      /var/log/supervisor \
-      /run/mysqld \
-      /etc/supervisor/conf.d && \
-    chown -R "${FRAPPE_USER}:${FRAPPE_USER}" /workspace "${FRAPPE_HOME}" && \
-    chown -R mysql:mysql /var/lib/mysql /run/mysqld && \
-    chown -R redis:redis /var/lib/redis
+    mkdir -p "${DATA_DIR}" "${FRAPPE_HOME}" && \
+    chown 1000:1000 "${DATA_DIR}" "${FRAPPE_HOME}" && \
+    chmod 0750 "${DATA_DIR}" && \
+    # Drop the distro supervisor config that expects root-owned /var/run paths.
+    rm -f /etc/supervisor/supervisord.conf
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY docker/supervisor/devbox.conf /etc/supervisor/conf.d/devbox.conf
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=0644 docker/supervisor/devbox.conf /etc/supervisor/devbox.conf
 
-RUN chmod 0755 /usr/local/bin/entrypoint.sh
+USER 1000:1000
+WORKDIR /data
 
-WORKDIR /workspace
+VOLUME ["/data"]
 
-VOLUME ["/workspace", "/var/lib/mysql", "/var/lib/redis", "/home/frappe/.local/share/code-server"]
-
-EXPOSE 8000 8080
+EXPOSE 8000 9000 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/devbox.conf"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/devbox.conf"]

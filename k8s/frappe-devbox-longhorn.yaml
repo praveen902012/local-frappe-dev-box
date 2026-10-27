@@ -1,0 +1,214 @@
+# Frappe v15 devbox on k3s with Longhorn storage.
+# Alternative to frappe-devbox.yaml (local-path): apply one or the other, not
+# both. They use the same names, so switching means deleting the old PVC.
+# Passes Pod Security "restricted" (non-root, no capabilities, no privilege
+# escalation, RuntimeDefault seccomp) and runs with a read-only root filesystem.
+#
+#   kubectl apply -f k8s/frappe-devbox.yaml
+#   kubectl -n frappe-staging logs -f deploy/frappe-devbox     # first boot: 15-30 min
+#   kubectl -n frappe-staging port-forward deploy/frappe-devbox 8080:8080   # code-server
+#
+# Change before applying: the image, the three Secret values, the Ingress host.
+---
+# Two replicas instead of Longhorn's default three, with a replica kept on the
+# pod's node, so MariaDB and yarn's many small writes are mostly local.
+# Retain keeps the bench and database if the PVC is deleted by mistake.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-devbox
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "2"
+  dataLocality: best-effort
+  staleReplicaTimeout: "30"
+  fsType: ext4
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: frappe-staging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: frappe-devbox
+  namespace: frappe-staging
+type: Opaque
+stringData:
+  SITE_ADMIN_PASSWORD: change-me
+  DB_ROOT_PASSWORD: change-me
+  CODE_SERVER_PASSWORD: change-me
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: frappe-devbox-data
+  namespace: frappe-staging
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn-devbox
+  resources:
+    requests:
+      storage: 20Gi   # enforced by Longhorn; grow later by editing this value
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frappe-devbox
+  namespace: frappe-staging
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # a Longhorn RWO volume attaches to one node; rolling updates hit multi-attach
+  selector:
+    matchLabels:
+      app: frappe-devbox
+  template:
+    metadata:
+      labels:
+        app: frappe-devbox
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 90   # lets supervisord stop MariaDB cleanly
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # A fresh Longhorn ext4 volume is root-owned; fsGroup makes it writable
+        # for uid 1000. OnRootMismatch chowns once instead of re-walking the
+        # bench's ~100k files on every mount, which would stall each start.
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: devbox
+          image: neuron27/frappe-v15-devbox:0.2.0   # build/push per README "Build"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: SITE_NAME
+              value: staging.localhost   # default site; Host header doesn't matter
+            - name: CREATE_SITE_ON_FIRST_RUN
+              value: "1"
+            - name: DEVBOX_INSTALL_APPS
+              value: ""                  # e.g. "hrms" (app must exist in the bench)
+            - name: MARIADB_START_TIMEOUT
+              value: "180"
+            - name: ENABLE_CODE_SERVER
+              value: "1"
+            - name: CODE_SERVER_AUTH
+              value: password
+            - name: PASSWORD             # code-server login
+              valueFrom:
+                secretKeyRef: { name: frappe-devbox, key: CODE_SERVER_PASSWORD }
+            - name: SITE_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: frappe-devbox, key: SITE_ADMIN_PASSWORD }
+            - name: DB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: frappe-devbox, key: DB_ROOT_PASSWORD }
+          ports:
+            - { name: web, containerPort: 8000 }
+            - { name: socketio, containerPort: 9000 }
+            - { name: code, containerPort: 8080 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: home, mountPath: /home/frappe }
+          # Requests are the minimum an idle devbox needs (MariaDB, Redis,
+          # bench start, code-server), so it schedules on a busy node.
+          # First boot (yarn install + asset build) bursts up to the limits.
+          resources:
+            requests: { cpu: 250m, memory: 1Gi, ephemeral-storage: 1Gi }
+            limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 8Gi }
+          startupProbe:          # first boot: bench init + yarn build + new-site
+            tcpSocket: { port: web }
+            periodSeconds: 20
+            failureThreshold: 180   # ~60 min; the 2-CPU limit slows the first build
+          readinessProbe:
+            httpGet: { path: /api/method/ping, port: web }
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: web }
+            periodSeconds: 30
+            failureThreshold: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: frappe-devbox-data
+        - name: tmp
+          emptyDir: {}
+        - name: home        # caches (uv, yarn, npm); rebuilt on restart
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frappe-devbox
+  namespace: frappe-staging
+spec:
+  selector:
+    app: frappe-devbox
+  ports:   # 8080 (code-server) stays private: use kubectl port-forward
+    - { name: web, port: 8000, targetPort: web }
+    - { name: socketio, port: 9000, targetPort: socketio }
+---
+# Only Traefik may reach the pod, and only on 8000/9000. Egress stays open:
+# bench needs GitHub, PyPI and npm. kubectl port-forward is unaffected.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frappe-devbox
+  namespace: frappe-staging
+spec:
+  podSelector:
+    matchLabels:
+      app: frappe-devbox
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - { port: 8000, protocol: TCP }
+        - { port: 9000, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frappe-devbox
+  namespace: frappe-staging
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: frappe-staging.example.com   # change me
+      http:
+        paths:
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service: { name: frappe-devbox, port: { name: socketio } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: frappe-devbox, port: { name: web } }

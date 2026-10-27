@@ -99,14 +99,25 @@ docker run --rm -it \
 
 ## Kubernetes (k3s)
 
-`k8s/frappe-devbox.yaml` deploys the devbox with a single `local-path` PVC, Pod Security `restricted`, a read-only root filesystem, a NetworkPolicy that only admits Traefik, and an Ingress that routes `/socket.io` to port 9000.
+Two manifests, identical except for storage. Apply one of them, not both:
+
+| File | Storage | Use when |
+|------|---------|----------|
+| `k8s/frappe-devbox.yaml` | `local-path` | Single node, or you don't mind the pod being pinned to the node that holds its data |
+| `k8s/frappe-devbox-longhorn.yaml` | Longhorn (`longhorn-devbox` StorageClass, 2 replicas, `dataLocality: best-effort`, `Retain`) | The pod should be able to move between nodes and survive a node loss |
+
+Both run under Pod Security `restricted` with a read-only root filesystem, a NetworkPolicy that only admits Traefik, and an Ingress that routes `/socket.io` to port 9000.
 
 ```bash
 # edit the image tag, Secret values and Ingress host first
-kubectl apply -f k8s/frappe-devbox.yaml
+kubectl apply -f k8s/frappe-devbox-longhorn.yaml      # or k8s/frappe-devbox.yaml
 kubectl -n frappe-staging logs -f deploy/frappe-devbox
 kubectl -n frappe-staging port-forward deploy/frappe-devbox 8080:8080   # code-server
 ```
+
+Resources: requests `250m` CPU / `1Gi` memory (enough for an idle devbox, so it schedules on a busy node), limits `2` CPU / `4Gi` memory. The first boot bursts to the limits during `yarn install` and the asset build; with the 2-CPU cap it can take up to an hour, and the startup probe allows for that. Because requests are below limits, the pod is in the Burstable QoS class and is evicted before Guaranteed pods if a node runs out of memory.
+
+With Longhorn, `fsGroupChangePolicy: OnRootMismatch` matters: without it the kubelet re-chowns every file in the bench on each mount, which stalls every restart once `node_modules` exists.
 
 code-server is deliberately not exposed through the Service or Ingress.
 

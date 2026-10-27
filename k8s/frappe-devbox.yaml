@@ -110,13 +110,16 @@ spec:
             - { name: data, mountPath: /data }
             - { name: tmp, mountPath: /tmp }
             - { name: home, mountPath: /home/frappe }
+          # Requests are the minimum an idle devbox needs (MariaDB, Redis,
+          # bench start, code-server), so it schedules on a busy node.
+          # First boot (yarn install + asset build) bursts up to the limits.
           resources:
-            requests: { cpu: 500m, memory: 2Gi, ephemeral-storage: 1Gi }
-            limits: { memory: 4Gi, ephemeral-storage: 8Gi }   # first-boot asset build is heavy
+            requests: { cpu: 250m, memory: 1Gi, ephemeral-storage: 1Gi }
+            limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 8Gi }
           startupProbe:          # first boot: bench init + yarn build + new-site
             tcpSocket: { port: web }
             periodSeconds: 20
-            failureThreshold: 120   # ~40 min
+            failureThreshold: 180   # ~60 min; the 2-CPU limit slows the first build
           readinessProbe:
             httpGet: { path: /api/method/ping, port: web }
             periodSeconds: 15

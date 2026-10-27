@@ -1,0 +1,53 @@
+{{- $fullname := include "frappe-devbox.fullname" . -}}
+{{- $secret := include "frappe-devbox.secretName" . -}}
+Frappe devbox "{{ $fullname }}" installed in namespace {{ .Release.Namespace }}.
+
+1. Follow the first boot (bench init + asset build + site creation, 15-30 min):
+
+     kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ $fullname }} -c bootstrap
+
+   Afterwards:
+
+     kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ $fullname }}
+
+2. Frappe:
+{{- if .Values.ingress.enabled }}
+     http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+     kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ $fullname }} 8000:8000 9000:9000
+     then open http://localhost:8000
+{{- end }}
+
+   Login: Administrator / password from:
+     kubectl -n {{ .Release.Namespace }} get secret {{ $secret }} -o jsonpath='{.data.SITE_ADMIN_PASSWORD}' | base64 -d; echo
+
+{{- if .Values.codeServer.enabled }}
+
+3. code-server:
+{{- if .Values.codeServer.ingress.enabled }}
+     http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.codeServer.ingress.host }}
+{{- else }}
+     kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ $fullname }} 8080:8080
+     then open http://localhost:8080
+{{- end }}
+{{- if eq .Values.codeServer.auth "password" }}
+   Password:
+     kubectl -n {{ .Release.Namespace }} get secret {{ $secret }} -o jsonpath='{.data.PASSWORD}' | base64 -d; echo
+{{- else }}
+   WARNING: code-server has no authentication (codeServer.auth=none).
+{{- end }}
+{{- end }}
+
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence.enabled=false. The bench, database and code-server data
+are lost whenever the pod restarts, and every restart repeats the first boot.
+{{- end }}
+{{- if .Values.persistence.keepOnUninstall }}
+
+Note: `helm uninstall` keeps the PVC and the Secret (they belong together: the
+MariaDB data only accepts the stored root password). Delete both by hand to
+wipe the workspace:
+  kubectl -n {{ .Release.Namespace }} delete pvc {{ include "frappe-devbox.claimName" . }}
+  kubectl -n {{ .Release.Namespace }} delete secret {{ $secret }}
+{{- end }}

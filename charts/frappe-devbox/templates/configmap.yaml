@@ -1,0 +1,27 @@
+{{- include "frappe-devbox.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "frappe-devbox.fullname" . }}
+  labels:
+    {{- include "frappe-devbox.labels" . | nindent 4 }}
+data:
+  SITE_NAME: {{ .Values.site.name | quote }}
+  CREATE_SITE_ON_FIRST_RUN: {{ ternary "1" "0" .Values.site.createOnFirstRun | quote }}
+  DEVBOX_INSTALL_APPS: {{ join "," .Values.site.installApps | quote }}
+  FRAPPE_BRANCH: {{ .Values.bench.frappeBranch | quote }}
+  DEVELOPER_MODE: {{ ternary "1" "0" .Values.bench.developerMode | quote }}
+  DNS_MULTITENANT: {{ ternary "1" "0" .Values.bench.dnsMultitenant | quote }}
+  MARIADB_START_TIMEOUT: {{ .Values.mariadb.startTimeoutSeconds | quote }}
+  ENABLE_LOCAL_MARIADB: {{ ternary "1" "0" .Values.mariadb.local | quote }}
+  {{- if not .Values.mariadb.local }}
+  DB_HOST: {{ .Values.externalDatabase.host | quote }}
+  DB_PORT: {{ .Values.externalDatabase.port | quote }}
+  {{- end }}
+  ENABLE_LOCAL_REDIS: {{ ternary "1" "0" .Values.redis.local | quote }}
+  {{- if not .Values.redis.local }}
+  REDIS_URL: {{ .Values.externalRedis.url | quote }}
+  {{- end }}
+  ENABLE_CODE_SERVER: {{ ternary "1" "0" .Values.codeServer.enabled | quote }}
+  CODE_SERVER_AUTH: {{ .Values.codeServer.auth | quote }}
+  VSCODE_EXTENSIONS: {{ join "," .Values.codeServer.extensions | quote }}

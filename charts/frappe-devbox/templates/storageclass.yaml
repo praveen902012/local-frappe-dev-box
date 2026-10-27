@@ -1,0 +1,32 @@
+{{- if .Values.longhornStorageClass.create }}
+{{- $sc := .Values.longhornStorageClass }}
+{{- $live := lookup "storage.k8s.io/v1" "StorageClass" "" $sc.name }}
+{{- $ownedByUs := and $live
+      (eq (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $live) .Release.Name)
+      (eq (dig "metadata" "annotations" "meta.helm.sh/release-namespace" "" $live) .Release.Namespace) }}
+{{- /*
+  Cluster-scoped and shared by every devbox release. If another release (or
+  something outside Helm) already created it, leave it alone instead of
+  failing the install on an ownership conflict.
+*/}}
+{{- if or (not $live) $ownedByUs }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $sc.name }}
+  labels:
+    {{- include "frappe-devbox.labels" . | nindent 4 }}
+  annotations:
+    # StorageClass parameters are immutable and PVCs depend on it.
+    helm.sh/resource-policy: keep
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: {{ $sc.reclaimPolicy }}
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: {{ $sc.numberOfReplicas | quote }}
+  dataLocality: {{ $sc.dataLocality | quote }}
+  staleReplicaTimeout: {{ $sc.staleReplicaTimeout | quote }}
+  fsType: {{ $sc.fsType | quote }}
+{{- end }}
+{{- end }}

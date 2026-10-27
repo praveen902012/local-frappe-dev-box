@@ -99,6 +99,16 @@ docker run --rm -it \
 
 ## Kubernetes (k3s)
 
+### Helm chart
+
+`charts/frappe-devbox` deploys one workspace per release, with generated passwords, Longhorn or local-path storage, Ingress with optional TLS, and a NetworkPolicy. See [charts/frappe-devbox/README.md](charts/frappe-devbox/README.md).
+
+```bash
+helm install alice ./charts/frappe-devbox -n frappe-dev --set ingress.host=alice.dev.example.com
+```
+
+### Plain manifests
+
 Two manifests, identical except for storage. Apply one of them, not both:
 
 | File | Storage | Use when |

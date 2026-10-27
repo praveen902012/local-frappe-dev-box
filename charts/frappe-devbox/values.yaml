@@ -1,0 +1,210 @@
+# Frappe devbox: one pod with bench, MariaDB, Redis and code-server.
+# One release = one developer workspace. Install several releases (one per
+# developer or branch) into the same namespace if you need more.
+
+image:
+  repository: neuron27/frappe-v15-devbox
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Frappe / bench ------------------------------------------------------------
+
+site:
+  # Default site. Host headers don't matter while dnsMultitenant is false.
+  name: dev.localhost
+  createOnFirstRun: true
+  # Apps to install after site creation, e.g. ["hrms"]. Each app must already
+  # be in the bench (bench get-app).
+  installApps: []
+
+bench:
+  frappeBranch: version-15
+  developerMode: true
+  dnsMultitenant: false
+
+mariadb:
+  # false: use an external MariaDB at externalDatabase.host.
+  local: true
+  startTimeoutSeconds: 180
+
+externalDatabase:
+  host: ""
+  port: 3306
+
+redis:
+  # false: use an external Redis at externalRedis.url.
+  local: true
+
+externalRedis:
+  url: ""   # redis://host:6379
+
+codeServer:
+  enabled: true
+  # "password" or "none". "none" gives anyone who reaches port 8080 a shell.
+  auth: password
+  extensions:
+    - ms-python.python
+    - dbaeumer.vscode-eslint
+  # Expose code-server through the Ingress (on its own host). Off by default:
+  # use `kubectl port-forward` instead. If you turn this on, keep auth on.
+  ingress:
+    enabled: false
+    host: ""
+
+# Extra environment variables for both containers.
+extraEnv: []
+#  - name: DEVBOX_FOO
+#    value: bar
+
+# --- Credentials ---------------------------------------------------------------
+
+auth:
+  # Use an existing Secret instead of creating one. It must contain the keys
+  # SITE_ADMIN_PASSWORD, DB_ROOT_PASSWORD and (when code-server auth is on)
+  # PASSWORD.
+  existingSecret: ""
+  # Leave empty to generate random passwords on install. Generated values are
+  # kept across `helm upgrade`. Read them back with the command in NOTES.
+  siteAdminPassword: ""
+  dbRootPassword: ""
+  codeServerPassword: ""
+
+# --- Storage -------------------------------------------------------------------
+
+persistence:
+  # Holds the bench, MariaDB, Redis and code-server data. Losing it means
+  # losing the workspace.
+  enabled: true
+  existingClaim: ""
+  # "local-path", "longhorn", "longhorn-devbox" (see longhornStorageClass), or
+  # any class in the cluster. Empty uses the cluster default.
+  storageClass: longhorn-devbox
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+  # Keep the PVC when the release is uninstalled.
+  keepOnUninstall: true
+  annotations: {}
+
+# Creates a cluster-wide Longhorn StorageClass tuned for the devbox. Create it
+# from one release only (it is cluster-scoped), or set create: false and point
+# persistence.storageClass at a class you manage yourself.
+longhornStorageClass:
+  create: true
+  name: longhorn-devbox
+  numberOfReplicas: 2
+  # Keeps a replica on the pod's node so MariaDB and yarn writes stay local.
+  dataLocality: best-effort
+  reclaimPolicy: Retain
+  staleReplicaTimeout: 30
+  fsType: ext4
+
+# --- Resources -----------------------------------------------------------------
+
+# First-boot build (bench init, yarn install, asset build, new-site) runs in
+# an init container with these limits, then exits. Later restarts finish it in
+# seconds. Requests stay small so the pod schedules on a busy node; limits are
+# not reserved, so the node must really have this much free during first boot.
+bootstrap:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+      ephemeral-storage: 8Gi
+
+# The running workspace.
+resources:
+  requests:
+    cpu: 250m
+    memory: 1Gi
+    ephemeral-storage: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+    ephemeral-storage: 8Gi
+
+# --- Networking ----------------------------------------------------------------
+
+service:
+  type: ClusterIP
+  webPort: 8000
+  socketioPort: 9000
+  annotations: {}
+
+ingress:
+  enabled: true
+  className: traefik
+  host: frappe-devbox.example.com
+  annotations: {}
+  #  cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: false
+    # Defaults to <fullname>-tls.
+    secretName: ""
+
+networkPolicy:
+  enabled: true
+  # Who may reach ports 8000/9000 (and 8080 when codeServer.ingress.enabled).
+  # Defaults match the Traefik that ships with k3s.
+  ingressController:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: traefik
+  # Extra ingress rules (NetworkPolicyIngressRule objects).
+  extraIngress: []
+
+# --- Pod -----------------------------------------------------------------------
+
+podAnnotations: {}
+podLabels: {}
+
+# Meets Pod Security "restricted". Changing uid/gid breaks the image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  # Chown the volume once instead of walking the whole bench on every mount.
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Lets supervisord stop MariaDB cleanly.
+terminationGracePeriodSeconds: 90
+
+probes:
+  startup:
+    periodSeconds: 10
+    failureThreshold: 60   # ~10 min after the bootstrap init container
+  readiness:
+    periodSeconds: 15
+    timeoutSeconds: 5
+  liveness:
+    periodSeconds: 30
+    failureThreshold: 5
+
+# Images built with the README's buildx command are amd64 + arm64. The 0.1.x
+# image on Docker Hub is amd64 only; pin it with kubernetes.io/arch: amd64.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: frappe-devbox
+description: Browser-accessible Frappe v15 developer workspace (bench, MariaDB, Redis, code-server) in a single pod. Not a production Frappe deployment.
+type: application
+version: 0.1.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - frappe
+  - erpnext
+  - devbox
+  - code-server
+home: https://github.com/praveen902012/local-frappe-dev-box
+sources:
+  - https://github.com/praveen902012/local-frappe-dev-box

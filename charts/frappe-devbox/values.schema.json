@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "site", "persistence", "resources", "bootstrap"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "site": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "createOnFirstRun": { "type": "boolean" },
+        "installApps": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_]+$" } }
+      }
+    },
+    "bench": {
+      "type": "object",
+      "properties": {
+        "frappeBranch": { "type": "string", "minLength": 1 },
+        "developerMode": { "type": "boolean" },
+        "dnsMultitenant": { "type": "boolean" }
+      }
+    },
+    "mariadb": {
+      "type": "object",
+      "properties": {
+        "local": { "type": "boolean" },
+        "startTimeoutSeconds": { "type": "integer", "minimum": 10 }
+      }
+    },
+    "externalDatabase": {
+      "type": "object",
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "redis": { "type": "object", "properties": { "local": { "type": "boolean" } } },
+    "externalRedis": {
+      "type": "object",
+      "properties": { "url": { "type": "string", "pattern": "^$|^rediss?://" } }
+    },
+    "codeServer": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "auth": { "enum": ["password", "none"] },
+        "extensions": { "type": "array", "items": { "type": "string" } },
+        "ingress": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" }, "host": { "type": "string" } }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "siteAdminPassword": { "type": "string" },
+        "dbRootPassword": { "type": "string" },
+        "codeServerPassword": { "type": "string" }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingClaim": { "type": "string" },
+        "storageClass": { "type": "string" },
+        "accessModes": { "type": "array", "items": { "type": "string" } },
+        "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$" },
+        "keepOnUninstall": { "type": "boolean" }
+      }
+    },
+    "longhornStorageClass": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "numberOfReplicas": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "dataLocality": { "enum": ["disabled", "best-effort", "strict-local"] },
+        "reclaimPolicy": { "enum": ["Retain", "Delete"] },
+        "staleReplicaTimeout": { "type": "integer", "minimum": 1 },
+        "fsType": { "enum": ["ext4", "xfs"] }
+      }
+    },
+    "resources": { "$ref": "#/definitions/resources" },
+    "bootstrap": {
+      "type": "object",
+      "properties": { "resources": { "$ref": "#/definitions/resources" } }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "webPort": { "type": "integer" },
+        "socketioPort": { "type": "integer" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string" },
+        "tls": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" }, "secretName": { "type": "string" } }
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "runAsUser": { "const": 1000 },
+        "runAsGroup": { "const": 1000 },
+        "runAsNonRoot": { "const": true }
+      }
+    }
+  },
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": { "type": "object" },
+        "limits": { "type": "object" }
+      }
+    }
+  }
+}

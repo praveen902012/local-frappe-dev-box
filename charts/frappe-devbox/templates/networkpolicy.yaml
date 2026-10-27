@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled }}
+# Only the ingress controller may reach the pod. Egress stays open: bench needs
+# GitHub, PyPI and npm. kubectl port-forward is unaffected.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "frappe-devbox.fullname" . }}
+  labels:
+    {{- include "frappe-devbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "frappe-devbox.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  {{- $ic := .Values.networkPolicy.ingressController }}
+  {{- if not (or $ic.namespaceSelector $ic.podSelector) }}
+  {{- fail "networkPolicy.ingressController needs a namespaceSelector and/or podSelector (or set networkPolicy.enabled=false)" }}
+  {{- end }}
+  ingress:
+    - from:
+        - {{- with $ic.namespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $ic.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      ports:
+        - port: 8000
+          protocol: TCP
+        - port: 9000
+          protocol: TCP
+        {{- if and .Values.codeServer.enabled .Values.codeServer.ingress.enabled }}
+        - port: 8080
+          protocol: TCP
+        {{- end }}
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

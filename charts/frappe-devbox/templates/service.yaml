@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "frappe-devbox.fullname" . }}
+  labels:
+    {{- include "frappe-devbox.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "frappe-devbox.selectorLabels" . | nindent 4 }}
+  # MariaDB (3306) and Redis (6379) are never exposed. code-server (8080) only
+  # when it is published through the Ingress.
+  ports:
+    - name: web
+      port: {{ .Values.service.webPort }}
+      targetPort: web
+    - name: socketio
+      port: {{ .Values.service.socketioPort }}
+      targetPort: socketio
+    {{- if and .Values.codeServer.enabled .Values.codeServer.ingress.enabled }}
+    - name: code
+      port: 8080
+      targetPort: code
+    {{- end }}

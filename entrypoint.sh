@@ -318,6 +318,9 @@ start_temp_services() {
 stop_temp_services() {
   stop_temp_redis
   stop_temp_mariadb
+  # /tmp may be shared with a later container in the pod (bootstrap init
+  # container); don't leave the root password behind.
+  rm -f "${RUN_DIR}/root.cnf"
 }
 
 # --- bench / site ------------------------------------------------------------

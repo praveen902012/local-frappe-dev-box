@@ -3,7 +3,8 @@
 # escalation, RuntimeDefault seccomp) and runs with a read-only root filesystem.
 #
 #   kubectl apply -f k8s/frappe-devbox.yaml
-#   kubectl -n frappe-staging logs -f deploy/frappe-devbox     # first boot: 15-30 min
+#   kubectl -n frappe-staging logs -f deploy/frappe-devbox -c bootstrap   # first boot: 15-30 min
+#   kubectl -n frappe-staging logs -f deploy/frappe-devbox                # afterwards
 #   kubectl -n frappe-staging port-forward deploy/frappe-devbox 8080:8080   # code-server
 #
 # Change before applying: the image, the three Secret values, the Ingress host.
@@ -27,7 +28,21 @@ type: Opaque
 stringData:
   SITE_ADMIN_PASSWORD: change-me
   DB_ROOT_PASSWORD: change-me
-  CODE_SERVER_PASSWORD: change-me
+  PASSWORD: change-me            # code-server login
+---
+# Shared by the bootstrap init container and the main container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frappe-devbox
+  namespace: frappe-staging
+data:
+  SITE_NAME: staging.localhost   # default site; Host header doesn't matter
+  CREATE_SITE_ON_FIRST_RUN: "1"
+  DEVBOX_INSTALL_APPS: ""        # e.g. "hrms" (app must exist in the bench)
+  MARIADB_START_TIMEOUT: "180"
+  ENABLE_CODE_SERVER: "1"
+  CODE_SERVER_AUTH: password
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -71,6 +86,33 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      # Build/run split: the init container does the slow first-boot work
+      # (bench init, yarn install, asset build, new-site) with high limits and
+      # exits; the main container then runs with the lower limits. On later
+      # restarts the init container finds everything in place and exits in
+      # seconds. Scheduling uses the larger of the two requests, so both stay
+      # minimal.
+      initContainers:
+        - name: bootstrap
+          image: neuron27/frappe-v15-devbox:0.2.0   # keep in sync with the main container
+          # securityContext, envFrom and volumeMounts must match the main container.
+          imagePullPolicy: IfNotPresent
+          args: ["/bin/true"]   # entrypoint bootstraps, then execs this and exits 0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          envFrom:
+            - configMapRef: { name: frappe-devbox }
+            - secretRef: { name: frappe-devbox }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: home, mountPath: /home/frappe }
+          resources:
+            requests: { cpu: 250m, memory: 1Gi, ephemeral-storage: 1Gi }
+            limits: { cpu: "4", memory: 8Gi, ephemeral-storage: 8Gi }
       containers:
         - name: devbox
           image: neuron27/frappe-v15-devbox:0.2.0   # build/push per README "Build"
@@ -80,28 +122,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          env:
-            - name: SITE_NAME
-              value: staging.localhost   # default site; Host header doesn't matter
-            - name: CREATE_SITE_ON_FIRST_RUN
-              value: "1"
-            - name: DEVBOX_INSTALL_APPS
-              value: ""                  # e.g. "hrms" (app must exist in the bench)
-            - name: MARIADB_START_TIMEOUT
-              value: "180"
-            - name: ENABLE_CODE_SERVER
-              value: "1"
-            - name: CODE_SERVER_AUTH
-              value: password
-            - name: PASSWORD             # code-server login
-              valueFrom:
-                secretKeyRef: { name: frappe-devbox, key: CODE_SERVER_PASSWORD }
-            - name: SITE_ADMIN_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: frappe-devbox, key: SITE_ADMIN_PASSWORD }
-            - name: DB_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: frappe-devbox, key: DB_ROOT_PASSWORD }
+          envFrom:
+            - configMapRef: { name: frappe-devbox }
+            - secretRef: { name: frappe-devbox }
           ports:
             - { name: web, containerPort: 8000 }
             - { name: socketio, containerPort: 9000 }
@@ -112,14 +135,13 @@ spec:
             - { name: home, mountPath: /home/frappe }
           # Requests are the minimum an idle devbox needs (MariaDB, Redis,
           # bench start, code-server), so it schedules on a busy node.
-          # First boot (yarn install + asset build) bursts up to the limits.
           resources:
             requests: { cpu: 250m, memory: 1Gi, ephemeral-storage: 1Gi }
             limits: { cpu: "2", memory: 4Gi, ephemeral-storage: 8Gi }
-          startupProbe:          # first boot: bench init + yarn build + new-site
+          startupProbe:          # bootstrap already done by the init container
             tcpSocket: { port: web }
-            periodSeconds: 20
-            failureThreshold: 180   # ~60 min; the 2-CPU limit slows the first build
+            periodSeconds: 10
+            failureThreshold: 60    # ~10 min
           readinessProbe:
             httpGet: { path: /api/method/ping, port: web }
             periodSeconds: 15

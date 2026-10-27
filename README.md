@@ -115,7 +115,20 @@ kubectl -n frappe-staging logs -f deploy/frappe-devbox
 kubectl -n frappe-staging port-forward deploy/frappe-devbox 8080:8080   # code-server
 ```
 
-Resources: requests `250m` CPU / `1Gi` memory (enough for an idle devbox, so it schedules on a busy node), limits `2` CPU / `4Gi` memory. The first boot bursts to the limits during `yarn install` and the asset build; with the 2-CPU cap it can take up to an hour, and the startup probe allows for that. Because requests are below limits, the pod is in the Burstable QoS class and is evicted before Guaranteed pods if a node runs out of memory.
+### Build and run limits
+
+The pod has two phases with different limits:
+
+| Container | Does | Requests | Limits |
+|-----------|------|----------|--------|
+| `bootstrap` (init) | `bench init`, `yarn install`, asset build, `new-site`, then exits | `250m` / `1Gi` | `4` CPU / `8Gi` |
+| `devbox` | Runs MariaDB, Redis, `bench start`, code-server | `250m` / `1Gi` | `2` CPU / `4Gi` |
+
+The init container runs the normal entrypoint with `/bin/true` as its command, so it bootstraps and exits. On later restarts it finds the bench and site in place and exits in a few seconds. The scheduler reserves the larger of the two requests, so the pod still fits on a busy node. Requests below limits put the pod in the Burstable QoS class: if a node runs short of memory it is evicted before Guaranteed pods, and the 8Gi build limit is only safe if the node actually has that much free during the first boot.
+
+Follow the first boot with `kubectl -n frappe-staging logs -f deploy/frappe-devbox -c bootstrap`.
+
+Work you run yourself inside the devbox (for example `bench build` or `bench get-app` from code-server) runs in the main container and is capped at 2 CPU / 4Gi. For a heavy one-off, raise the main container's limits temporarily (`kubectl -n frappe-staging set resources deploy/frappe-devbox -c devbox --limits=cpu=4,memory=8Gi`), then set them back; each change restarts the pod, which takes seconds once the bench exists.
 
 With Longhorn, `fsGroupChangePolicy: OnRootMismatch` matters: without it the kubelet re-chowns every file in the bench on each mount, which stalls every restart once `node_modules` exists.
 
